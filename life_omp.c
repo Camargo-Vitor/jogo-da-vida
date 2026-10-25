@@ -3,7 +3,10 @@
 #include <string.h>
 
 #define MAX_RULE_LEN 32
-#define MIN_CELLS_FOR_PARALLEL 10000
+#define MIN_CELLS_FOR_PARALLEL 1000
+
+/* Representação interna das células: 0 = morta, 1 = viva. */
+typedef unsigned char cell_t;
 
 typedef struct {
     int birth[9];
@@ -46,41 +49,18 @@ void parse_rule(const char *text, Rule *rule) {
 
 
 /*
- * Conta os vizinhos vivos da célula (row, col).
+ * Conta os vizinhos vivos da célula na posição 'pos'.
  *
- * A grade não é toroidal:
- * posições fora da matriz são simplesmente ignoradas.
+ * Como as células valem 0 ou 1 e a grade tem borda morta,
+ * o número de vizinhos vivos é simplesmente a soma dos 8 bytes
+ * ao redor: sem comparações e sem testes de limite.
+ *
+ * stride = largura da linha na grade com padding (C + 2).
  */
-int count_neighbors(
-    const char *grid,
-    int rows,
-    int cols,
-    int row,
-    int col
-) {
-    int count = 0;
-
-    for (int dr = -1; dr <= 1; dr++) {
-        for (int dc = -1; dc <= 1; dc++) {
-
-            if (dr == 0 && dc == 0) {
-                continue;
-            }
-
-            int nr = row + dr;
-            int nc = col + dc;
-
-            if (nr >= 0 && nr < rows &&
-                nc >= 0 && nc < cols) {
-
-                if (grid[nr * cols + nc] == 'x') {
-                    count++;
-                }
-            }
-        }
-    }
-
-    return count;
+static inline int count_neighbors(const cell_t *grid, int stride, int pos) {
+    return grid[pos - stride - 1] + grid[pos - stride] + grid[pos - stride + 1]
+         + grid[pos - 1]                               + grid[pos + 1]
+         + grid[pos + stride - 1] + grid[pos + stride] + grid[pos + stride + 1];
 }
 
 
@@ -90,49 +70,43 @@ int count_neighbors(
  * current nunca é alterada durante o cálculo.
  * Todos os novos estados são escritos em next.
  *
- * Isso garante a evolução síncrona.
+ * rows e cols são as dimensões REAIS (L e C).
+ * Os arrays current/next têm (rows+2) x (cols+2) posições.
+ * rule_matrix continua com rows x cols (sem padding).
+ *
+ * Somente o interior de next é escrito; a moldura permanece morta (0).
  */
 void next_generation(
-    const char *current,
-    char *next,
+    const cell_t *current,
+    cell_t *next,
     const int *rule_matrix,
     const Rule *rules,
     int rows,
     int cols
 ) {
+    const int stride = cols + 2;
+
     #pragma omp for
     for (int row = 0; row < rows; row++) {
+
+        /* posição da célula (row, 0) dentro da grade com padding */
+        const int base = (row + 1) * stride + 1;
+
         for (int col = 0; col < cols; col++) {
 
-            int pos = row * cols + col;
+            const int pos = base + col;
 
-            int neighbors =
-                count_neighbors(current, rows, cols, row, col);
+            const int neighbors = count_neighbors(current, stride, pos);
 
-            int rule_id = rule_matrix[pos];
+            const Rule *rule = &rules[rule_matrix[row * cols + col]];
 
-            if (current[pos] == 'x') {
-                /*
-                 * Célula atualmente viva.
-                 * Consulta a parte S da regra.
-                 */
-                if (rules[rule_id].survival[neighbors]) {
-                    next[pos] = 'x';
-                } else {
-                    next[pos] = ' ';
-                }
-
-            } else {
-                /*
-                 * Célula atualmente morta.
-                 * Consulta a parte B da regra.
-                 */
-                if (rules[rule_id].birth[neighbors]) {
-                    next[pos] = 'x';
-                } else {
-                    next[pos] = ' ';
-                }
-            }
+            /*
+             * Viva  -> consulta a parte S da regra.
+             * Morta -> consulta a parte B da regra.
+             * Os vetores já guardam 0/1, que é o próximo estado.
+             */
+            next[pos] = current[pos] ? rule->survival[neighbors]
+                                     : rule->birth[neighbors];
         }
     }
 }
@@ -192,7 +166,7 @@ int main(void) {
 
     /*
      * Matriz contendo o identificador da regra
-     * associada a cada posição.
+     * associada a cada posição (sem padding, L x C).
      */
     for (int row = 0; row < L; row++) {
         for (int col = 0; col < C; col++) {
@@ -229,8 +203,15 @@ int main(void) {
     while ((ch = getchar()) != '\n' && ch != EOF) {
     }
 
-    char *current = malloc(total_cells * sizeof(char));
-    char *next = malloc(total_cells * sizeof(char));
+    /*
+     * Grades com borda morta: (L+2) x (C+2).
+     * A célula lógica (row, col) fica em (row+1)*stride + (col+1).
+     */
+    const int stride = C + 2;
+    const size_t padded_cells = (size_t)(L + 2) * (size_t)stride;
+
+    cell_t *current = malloc(padded_cells * sizeof(cell_t));
+    cell_t *next = malloc(padded_cells * sizeof(cell_t));
 
     if (current == NULL || next == NULL) {
         fprintf(stderr, "Erro de alocacao de memoria.\n");
@@ -244,9 +225,16 @@ int main(void) {
     }
 
     /*
-     * Como espaços são significativos, não podemos usar scanf("%s").
-     *
-     * É necessário usar fgets.
+     * Inicializa AMBOS os buffers como mortos (0), garantindo a moldura
+     * morta nos dois. next_generation só escreve no interior, então a
+     * moldura permanece 0 mesmo após as trocas current <-> next.
+     */
+    memset(current, 0, padded_cells * sizeof(cell_t));
+    memset(next, 0, padded_cells * sizeof(cell_t));
+
+    /*
+     * Como espaços são significativos no arquivo de entrada,
+     * não podemos usar scanf("%s"). É necessário usar fgets.
      */
     char *line = malloc((C + 3) * sizeof(char));
 
@@ -276,18 +264,15 @@ int main(void) {
         }
 
         /*
-         * Copia exatamente C posições.
-         *
-         * Caso haja alguma linha menor por algum motivo,
-         * as posições faltantes são consideradas mortas.
+         * Converte texto -> binário na entrada:
+         * 'x' ou 'X' vira 1; qualquer outro caractere (ou posição
+         * faltante em linha curta) permanece 0.
          */
         for (int col = 0; col < C; col++) {
 
-            if (line[col] == 'x' || line[col] == 'X') {
-                current[row * C + col] = 'x';
-            } else {
-                current[row * C + col] = ' ';
-            }
+            int pos = (row + 1) * stride + (col + 1);
+
+            current[pos] = (line[col] == 'x' || line[col] == 'X') ? 1 : 0;
         }
     }
 
@@ -314,7 +299,7 @@ int main(void) {
 
             #pragma omp single
             {
-                char *temp = current;
+                cell_t *temp = current;
                 current = next;
                 next = temp;
             }
@@ -322,13 +307,14 @@ int main(void) {
     }
 
     /*
-     * Imprime exatamente L linhas,
-     * cada uma contendo C posições.
+     * Converte binário -> texto na saída:
+     * 1 vira 'x', 0 vira ' '.
+     * Imprime exatamente L linhas de C caracteres (sem a moldura).
      */
     for (int row = 0; row < L; row++) {
 
         for (int col = 0; col < C; col++) {
-            putchar(current[row * C + col]);
+            putchar(current[(row + 1) * stride + (col + 1)] ? 'x' : ' ');
         }
 
         putchar('\n');
