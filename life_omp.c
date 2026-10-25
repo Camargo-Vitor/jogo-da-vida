@@ -86,7 +86,7 @@ void next_generation(
 ) {
     const int stride = cols + 2;
 
-    #pragma omp for
+    #pragma omp for collapse(2) schedule(static)
     for (int row = 0; row < rows; row++) {
 
         /* posição da célula (row, 0) dentro da grade com padding */
