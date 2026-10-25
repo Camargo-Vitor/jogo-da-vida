@@ -88,13 +88,9 @@ void next_generation(
 
     #pragma omp for collapse(2) schedule(static)
     for (int row = 0; row < rows; row++) {
-
-        /* posição da célula (row, 0) dentro da grade com padding */
-        const int base = (row + 1) * stride + 1;
-
         for (int col = 0; col < cols; col++) {
 
-            const int pos = base + col;
+            const int pos = (row + 1) * stride + (col + 1);
 
             const int neighbors = count_neighbors(current, stride, pos);
 
