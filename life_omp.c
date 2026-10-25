@@ -1,3 +1,6 @@
+#include <errno.h>
+#include <limits.h>
+#include <omp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -138,7 +141,21 @@ void next_generation(
 }
 
 
-int main(void) {
+int main(int argc, char *argv[]) {
+    if (argc != 2) {
+        fprintf(stderr, "Uso: %s <numero_de_threads>\n", argv[0]);
+        return 1;
+    }
+
+    char *end;
+    errno = 0;
+    long thread_count = strtol(argv[1], &end, 10);
+    if (errno == ERANGE || end == argv[1] || *end != '\0' ||
+        thread_count < 1 || thread_count > INT_MAX) {
+        fprintf(stderr, "Numero de threads invalido: %s\n", argv[1]);
+        return 1;
+    }
+    omp_set_num_threads((int) thread_count);
 
     int L, C, G;
 
